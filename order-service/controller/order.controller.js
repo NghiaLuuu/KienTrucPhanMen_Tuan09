@@ -1,20 +1,62 @@
 const orderService = require('../service/order.service');
 const amqp = require('amqplib');
+const CircuitBreaker = require('opossum');
+const Bottleneck = require('bottleneck');
+const retry = require('async-retry');
+// Rate Limiter: 5 requests per minute
+const limiter = new Bottleneck({
+  reservoir: 5,
+  reservoirRefreshAmount: 5,
+  reservoirRefreshInterval: 60 * 1000,
+  maxConcurrent: 1,
+  minTime: 200
+});
 
-const sendOrderToCustomer = async (order) => {
+// Raw send function
+const rawSendOrderToCustomer = async (order) => {
+  await retry(async (bail, attempt) => {
+    try {
+      const connection = await amqp.connect('amqp://localhost');
+      const channel = await connection.createChannel();
+      const exchange = 'order_exchange';
+      const routingKey = 'order.created';
+
+      await channel.assertExchange(exchange, 'direct', { durable: true });
+      const message = JSON.stringify(order);
+      channel.publish(exchange, routingKey, Buffer.from(message), { persistent: true });
+
+      console.log(`Sent order to Customer service (attempt ${attempt}):`, order);
+      await channel.close();
+      await connection.close();
+    } catch (error) {
+      // Nếu lỗi không thể khắc phục, không thử lại
+      if (error instanceof SomeNonRetryableError) {
+        bail(error);
+        return;
+      }
+      // Ném lỗi để retry
+      throw error;
+    }
+  }, {
+    retries: 3, // Số lần thử lại
+    minTimeout: 1000, // Thời gian chờ giữa các lần thử (ms)
+    factor: 2 // Hệ số tăng thời gian chờ (exponential backoff)
+  });
+};
+
+// Circuit Breaker options
+const breakerOptions = {
+  timeout: 5000, // 5s timeout
+  errorThresholdPercentage: 50, // % failed requests to open circuit
+  resetTimeout: 30000 // After 30s retry again
+};
+
+const breaker = new CircuitBreaker(rawSendOrderToCustomer, breakerOptions);
+
+// Final wrapped function with limiter + circuit breaker
+const sendOrderWithProtection = async (order) => {
   try {
-    const connection = await amqp.connect('amqp://localhost');
-    const channel = await connection.createChannel();
-    const exchange = 'order_exchange';
-    const routingKey = 'order.created'; // Key để phân phối sự kiện
-
-    await channel.assertExchange(exchange, 'direct', { durable: true });
-    const message = JSON.stringify(order);
-    channel.publish(exchange, routingKey, Buffer.from(message), { persistent: true });
-
-    console.log('Sent order to Customer service:', order);
-    await channel.close();
-    await connection.close();
+    await limiter.schedule(() => breaker.fire(order));
   } catch (error) {
     console.error('Error sending order to Customer service:', error);
   }
@@ -23,7 +65,7 @@ const sendOrderToCustomer = async (order) => {
 exports.createOrder = async (req, res) => {
   try {
     const order = await orderService.create(req.body);
-    await sendOrderToCustomer(order);  // Gửi sự kiện order tới Customer
+    await sendOrderWithProtection(order); // Use protected send
     res.status(201).json(order);
   } catch (err) {
     console.error('Error creating order:', err.message);
@@ -31,7 +73,6 @@ exports.createOrder = async (req, res) => {
   }
 };
 
-// Các hàm khác giữ nguyên
 exports.getOrder = async (req, res) => {
   try {
     const order = await orderService.getById(req.params.id);
