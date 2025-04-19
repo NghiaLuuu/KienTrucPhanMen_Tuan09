@@ -1,0 +1,81 @@
+services:
+  mongo:
+    image: mongo:latest
+    container_name: mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - microservices-network
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      retries: 3
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+    ports:
+      - "3000:3000"
+    depends_on:
+      - product-service
+      - order-service
+      - customer-service
+    networks:
+      - microservices-network
+
+  product-service:
+    build:
+      context: ./product-service
+    ports:
+      - "3001:3001"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/products
+    depends_on:
+      - mongo
+    networks:
+      - microservices-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"] # Thay đổi endpoint kiểm tra sức khỏe nếu cần
+      interval: 30s
+      retries: 3
+
+  order-service:
+    build:
+      context: ./order-service
+    ports:
+      - "3002:3002"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/orders
+    depends_on:
+      - mongo
+    networks:
+      - microservices-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"] # Thay đổi endpoint kiểm tra sức khỏe nếu cần
+      interval: 30s
+      retries: 3
+
+  customer-service:
+    build:
+      context: ./customer-service
+    ports:
+      - "3003:3003"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/customers
+    depends_on:
+      - mongo
+    networks:
+      - microservices-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"] # Thay đổi endpoint kiểm tra sức khỏe nếu cần
+      interval: 30s
+      retries: 3
+
+networks:
+  microservices-network:
+    driver: bridge
+
+volumes:
+  mongo-data:
